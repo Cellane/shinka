@@ -1,0 +1,128 @@
+#!/bin/bash
+
+##################################
+# Remove stopped containers      #
+##################################
+
+docker container prune -f > /dev/null 2>&1
+# docker image rm $(docker image ls -f "dangling=true" -q)
+docker image ls | grep "<none>" | awk '{ print $3; }' | xargs -r docker image rm > /dev/null 2>&1
+
+##################################
+# Global variable declarations   #
+##################################
+
+mapfile -t usedImages < <(docker container ls -a --format '{{.Image}}' | sort -u | uniq | awk -F ':' '$2{ print $1":"$2 }!$2{ print $1":latest" }')
+mapfile -t allImageIds < <(docker image ls --format '{{.ID}}' | sort -u)
+
+usedImages+=("busybox" "debian:buster-slim" "debian:stretch-slim" "dokku/ambassador" "dokku/letsencrypt" "dokku/s3backup" "dokku/wait" "gliderlabs/herokuish:latest")
+usedImageIds=()
+forRemoval=()
+export NEWT_COLORS="root=,blue"
+
+##################################
+# Helper functions               #
+##################################
+
+reportPercentage() {
+  count="${1}"
+  index="${2}"
+  image="${3}"
+  percentage=$(awk "BEGIN {printf \"%.0f\n\", (${index} + 1) / ${count} * 100}")
+
+  echo -e "XXX\n${percentage}\nLast processed: ${image}\nXXX"
+}
+
+##################################
+# Determine used images          #
+##################################
+
+for index in "${!usedImages[@]}"; do
+  image="${usedImages[$index]}"
+  IFS=":" read -ra parameters <<< "$image"
+
+  imageName="${parameters[0]}"
+  imageVersion="${parameters[1]}"
+
+  if [ "$imageVersion" = "" ]; then
+    id=$(docker image ls | grep "${imageName}" | awk '{ print $3 }')
+  else
+    id=$(docker image ls | grep "${imageName}" | grep "${imageVersion}" | awk '{ print $3 }')
+  fi
+
+  if [ ! "${id}" = "" ]; then
+    rootId=$(docker image history "${id}" | grep -v IMAGE | grep -v "LABEL com.dokku" | head -n 1 | awk '{ print $1 }')
+
+    if [ ! "${id}" = "${rootId}" ]; then
+      usedImageIds+=("${rootId}")
+    fi
+  fi
+
+  usedImageIds+=("${id}")
+  reportPercentage "${#usedImages[@]}" "${index}" "${image}"
+done > >(whiptail --title "Determining used images…" --gauge "Determining used images…" 6 120 0)
+
+##################################
+# Determine unused images        #
+##################################
+
+for index in "${!allImageIds[@]}"; do
+  imageId="${allImageIds[$index]}"
+  unused=true
+
+  for usedImageId in "${usedImageIds[@]}"; do
+    if [ "${imageId}" = "${usedImageId}" ]; then
+      unused=false
+    fi
+  done
+
+  if [ "${unused}" = true ]; then
+    mapfile -t name < <(docker image ls | grep "${imageId}" | grep -v "^dokku.*latest" | awk '{ print $1":"$2 }')
+
+    for tag in "${name[@]}"; do
+      forRemoval+=("${tag}")
+    done
+  fi
+
+  reportPercentage "${#allImageIds[@]}" "${index}" "${imageId}"
+done > >(whiptail --title "Determining unused images…" --gauge "Determining unused images…" 6 120 0)
+
+##################################
+# Sort results up nicely         #
+##################################
+
+readarray -t keyed < <(
+  for value in "${forRemoval[@]}"; do
+    vendor="${value%/*}"
+    imageWithVersion="${value#*/}"
+    image="${imageWithVersion%:*}"
+
+    echo "${image}-${vendor};${value}";
+  done | sort
+)
+
+readarray -t forRemoval < <(
+  for value in "${keyed[@]}"; do
+    echo "${value#*;}"
+  done
+)
+
+##################################
+# Transform result into choices  #
+##################################
+
+removalEntries=()
+
+for image in "${forRemoval[@]}"; do
+  removalEntries+=("${image}" "" "ON")
+done
+
+selectedRemovalsRaw=$(whiptail --checklist --separate-output --title "Orphans found" "Following images might be unused. Please select all that you want to remove." 20 120 "${#forRemoval[@]}" -- "${removalEntries[@]}" 3>&1 1>&2 2>&3)
+readarray -t selectedRemovals <<< "${selectedRemovalsRaw}"
+
+for index in "${!selectedRemovals[@]}"; do
+  image="${selectedRemovals[$index]}"
+
+  docker image rm "${image}"
+  reportPercentage "${#selectedRemovals[@]}" "${index}" "${image}"
+done > >(whiptail --title "Removing selected images…" --gauge "Removing selected images…" 6 120 0)

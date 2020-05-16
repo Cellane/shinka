@@ -1,0 +1,27 @@
+declare -A images
+declare -A basicAuthImages
+declare -A jwtTokenImages
+
+# The syntax for public (Docker Hub) images is as follows:
+# ["<app-name-in-dokku>"]='<docker-hub-endpoint-with-image-tags>;<regex-to-validate-tags-against>'
+#
+# If possible, it is recommended to apply a `name=` prefix filter to reduce the amount of search results returned from Docker Hub
+
+images=(
+  ["blog"]='https://registry.hub.docker.com/v2/repositories/library/ghost/tags?page_size=1024&name=3;^3\(\.[[:digit:]]\+\)\+-alpine$'
+  ["matomo"]='https://registry.hub.docker.com/v2/repositories/library/matomo/tags?page_size=1024;^[[:digit:]]\+\(\.[[:digit:]]\+\)\+$'
+)
+
+# The syntax for registries protected by Basic Auth is as follows:
+# ["<app-name-in-dokku>"]='<endpoint-with-image-tags>;<username>;<password>;<regex-to-validate-tags-against>'
+
+basicAuthImages=(
+  ["cadvisor"]='https://gcr.io/v2/google-containers/cadvisor/tags/list;username;json_key_or_password;^v0\(\.[[:digit:]]\+\)\+$'
+)
+
+# The syntax for registries requiring exchange of credentials for a JWT token is as follows:
+# ["<app-name-in-dokku>"]='<token-exchange-url>;<endpoint-with-image-tags>;<uisername>;<password>;<regex-to-validate-tags-against>'
+
+jwtTokenImages=(
+  ["files"]='https://docker.seadrive.org/service/token?service=harbor-registry&scope=repository:seafileltd/seafile-pro-mc:pull;https://docker.seadrive.org/v2/seafileltd/seafile-pro-mc/tags/list;username;password;^7\(\.[[:digit:]]\+\)\+$'
+)

@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+
+##################################
+# Global variable declarations   #
+##################################
+
+imageFile="images"
+
+if [[ ! -z "$1" ]]; then
+  imageFile="${1}.images"
+fi
+
+set -e
+source "${imageFile}"
+export NEWT_COLORS="root=,blue"
+
+declare -A updateList
+updated=false
+
+##################################
+# Helper functions               #
+##################################
+
+reportPercentage() {
+  count="${1}"
+  index="${2}"
+  image="${3}"
+  percentage=$(awk "BEGIN {printf \"%.0f\n\", (${index} + 1) / ${count} * 100}")
+
+  echo -e "XXX\n${percentage}\nLast checked app: ${image}\nXXX"
+}
+
+resolve() {
+  image="${1}"
+  latestVersion="${2}"
+
+  currentImageIdDokku=$(dokku tags "${image}" | grep dokku | grep latest | awk '{ print $3 }')
+  currentImageId=$(docker image history "${currentImageIdDokku}" | grep -v IMAGE | grep -v "LABEL com.dokku" | head -n 1 | awk '{ print $1 }')
+  currentVersion=$(docker image ls | grep -v latest | grep -v dokku | grep "${currentImageId}" | awk '{ print $2 }')
+
+  if [ "${currentVersion}" = "${latestVersion}" ]; then
+    return
+  fi
+
+  imageName=$(docker image ls | grep -v latest | grep -v dokku | grep "${currentImageId}" | awk '{ print $1 }')
+  # Maybe the line below could be “simplified” to `$(echo "${latestVersion#v*}")` ?
+  dokkuVersion=$(echo "${latestVersion}" | awk -F '-' '{ sub(/^v/, "", $1); print $1 }')
+
+  updateList["${image}"]="${imageName};${currentVersion};${latestVersion};${dokkuVersion}"
+}
+
+##################################
+# Configuration file check       #
+##################################
+if [ ! -f "${imageFile}" ]; then
+  whiptail --msgbox --title "Error" "Configuration file `${imageFile}` was not found!" 7 120
+  exit 1
+fi
+
+
+##################################
+# Root user check                #
+##################################
+
+if [ "$(id -nu)" != "root" ]; then
+  sudo -k
+  pass=$(whiptail --backtitle "Dokku App Updater" --title "Authentication required" --passwordbox "Checking for updated images and deploying them requires administrative privileges. Please enter your password to elevate privileges." 9 120 3>&2 2>&1 1>&3-)
+  exec sudo -S -p '' "${0}" "${@}" <<< "$pass"
+  exit 1
+fi
+
+##################################
+# Check Basic Auth images        #
+##################################
+
+keys=("${!basicAuthImages[@]}")
+
+for (( index=0; "${index}" < "${#basicAuthImages[@]}"; index+=1 )); do
+  app="${keys[$index]}"
+  IN="${basicAuthImages[$app]}"
+  IFS=";" read -ra parameters <<< "$IN"
+
+  registryUrl="${parameters[0]}"
+  username="${parameters[1]}"
+  password="${parameters[2]}"
+  regex="${parameters[3]}"
+
+  credentials=$(echo -n "${username}:${password}" | base64 -w 0)
+  latestVersion=$(curl -L -s -H "Authorization: Basic ${credentials}" "${registryUrl}" | jq -r '."tags"[]' | sort --version-sort | grep "${regex}" | tail -n 1)
+
+  resolve "${app}" "${latestVersion}"
+  reportPercentage "${#basicAuthImages[@]}" "${index}" "${app}"
+done > >(whiptail --title "Checking Basic Auth images…" --gauge "Checking Basic Auth images…" 6 120 0)
+
+##################################
+# Check JWT token images         #
+##################################
+
+keys=("${!jwtTokenImages[@]}")
+
+for (( index=0; "${index}" < "${#jwtTokenImages[@]}"; index+=1 )); do
+  app="${keys[$index]}"
+  data="${jwtTokenImages[$app]}"
+  IFS=";" read -ra parameters <<< "$data"
+
+  tokenUrl="${parameters[0]}"
+  tagsUrl="${parameters[1]}"
+  username="${parameters[2]}"
+  password="${parameters[3]}"
+  regex="${parameters[4]}"
+
+  credentials=$(echo -n "${username}:${password}" | base64 -w 0)
+  token=$(curl -L -s -H "Authorization: Basic ${credentials}" "${tokenUrl}" | jq -r '."token"')
+  latestVersion=$(curl -L -s -H "Authorization: Bearer ${token}" "${tagsUrl}" | jq -r '."tags"[]' | grep "${regex}" | sort --version-sort | tail -n 1)
+
+  resolve "${app}" "${latestVersion}"
+  reportPercentage "${#jwtTokenImages[@]}" "${index}" "${app}"
+done > >(whiptail --title "Checking JWT Auth images…" --gauge "Checking JWT Auth images…" 6 120 0)
+
+##################################
+# Check public images            #
+##################################
+
+keys=("${!images[@]}")
+
+for (( index=0; "${index}" < "${#images[@]}"; index+=1 )); do
+  app="${keys[$index]}"
+  data="${images[$app]}"
+  IFS=";" read -ra parameters <<< "$data"
+
+  registryUrl="${parameters[0]}"
+  regex="${parameters[1]}"
+  latestVersion=$(curl -L -s "${registryUrl}" | jq -r '."results"[]["name"]' | sort --version-sort | grep "${regex}" | tail -n 1)
+
+  resolve "${app}" "${latestVersion}"
+  reportPercentage "${#images[@]}" "${index}" "${app}"
+done > >(whiptail --title "Checking public images…" --gauge "Checking public images…" 6 120 0)
+
+##################################
+# Display check results          #
+##################################
+
+if [ "${#updateList[@]}" = 0 ]; then
+  whiptail --msgbox --title "No updates found" "No updates for deployed apps were found. Please try again later." 7 120
+  exit 0
+fi
+
+updateEntries=()
+
+for app in "${!updateList[@]}"; do
+  IN="${updateList[$app]}"
+  IFS=";" read -ra parameters <<< "$IN"
+
+  imageName="${parameters[0]}"
+  currentVersion="${parameters[1]}"
+  latestVersion="${parameters[2]}"
+  dokkuVersion="${parameters[3]}"
+  versions=$(printf "%35s -> %-35s" "${currentVersion}" "${latestVersion}")
+
+  updateEntries+=("${app}" "${versions}" "ON")
+done
+
+selectedUpdatesRaw=$(whiptail --checklist --separate-output --title "Updates found" "Following updates were found. Please select all that you want to apply." 20 120 "${#updateList[@]}" -- "${updateEntries[@]}" 3>&1 1>&2 2>&3)
+readarray -t selectedUpdates <<< "${selectedUpdatesRaw}"
+
+for index in "${!selectedUpdates[@]}"; do
+  app="${selectedUpdates[$index]}"
+  IN="${updateList[$app]}"
+  IFS=";" read -ra parameters <<< "$IN"
+
+  imageName="${parameters[0]}"
+  latestVersion="${parameters[2]}"
+  dokkuVersion="${parameters[3]}"
+
+  docker image pull "${imageName}":"${latestVersion}"
+  docker image tag "${imageName}":"${latestVersion}" dokku/"${app}":"${dokkuVersion}"
+  dokku tags:deploy "${app}" "${dokkuVersion}" 2>/dev/null
+
+  updated=true
+  percentage=$(awk "BEGIN {printf \"%.0f\n\", (${index} + 1) / ${#selectedUpdates[@]} * 100}")
+
+  echo -e "XXX\n${percentage}\nLast deployed app: ${app}\nXXX"
+done > >(whiptail --title "Deploying updates…" --gauge "Deploying updates…" 6 120 0)
+
+##################################
+# Offer clean-up                 #
+##################################
+
+if [ "${updated}" = true ]; then
+  start=$(date +%s)
+
+  if (whiptail --yesno "One or more app updates were deployed. Do you want to run a clean-up procedure?" 7 120); then
+    end=$(date +%s)
+    wait=$((120 - ("${end}" - "${start}")))
+    wait=$((wait > 0 ? wait : 0))
+
+    for (( index=0; index <= "${wait}"; index++ )); do
+      percentage=$(awk "BEGIN {printf \"%.0f\n\", (${index} + 1) / ${wait} * 100}")
+      left=$((wait - index))
+
+      echo -e "XXX\n${percentage}\nTime left: ${left}s\nXXX"
+      sleep 1
+    done > >(whiptail --title "Waiting for old containers to stop…" --gauge "Waiting for old containers to stop…" 6 120 0)
+
+    ./shinka-cleanup
+  fi
+fi
