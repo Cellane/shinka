@@ -6,8 +6,13 @@
 
 imageFile="images"
 
-if [[ ! -z "$1" ]]; then
+if [[ -n "$1" ]]; then
   imageFile="${1}.images"
+fi
+
+if [ ! -f "${imageFile}" ]; then
+  whiptail --msgbox --title "Error" "Configuration file \`${imageFile}\` was not found!" 7 120
+  exit 1
 fi
 
 set -e
@@ -48,15 +53,6 @@ resolve() {
 
   updateList["${image}"]="${imageName};${currentVersion};${latestVersion};${dokkuVersion}"
 }
-
-##################################
-# Configuration file check       #
-##################################
-if [ ! -f "${imageFile}" ]; then
-  whiptail --msgbox --title "Error" "Configuration file `${imageFile}` was not found!" 7 120
-  exit 1
-fi
-
 
 ##################################
 # Root user check                #
